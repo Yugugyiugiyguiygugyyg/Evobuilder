@@ -2,7 +2,6 @@ import sys, re, time, requests, os, threading, json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import deque
 
-# Читаем токены из конфига, созданного bash-скриптом
 try:
     with open(os.path.expanduser('~/.rom_build_config'), 'r') as f:
         config = f.read()
@@ -12,22 +11,19 @@ except Exception:
     print("Ошибка чтения ~/.rom_build_config")
     sys.exit(1)
 
-# Глобальное состояние
 state_lock = threading.Lock()
 state = {
     "stage": "Инициализация...",
     "percent": 0,
-    "status": "running", # running, waiting, success, error, cancelled
-    "logs": deque(maxlen=200), # Храним последние 200 строк лога для веба
-    "confirmation": None, # 'yes' или 'no'
+    "status": "running", 
+    "logs": deque(maxlen=200),
+    "confirmation": None,
     "error_msg": ""
 }
 
-# Регулярки
 re_build = re.compile(r'\[\s*(\d+)%\s+\d+/\d+\]')
 re_sync = re.compile(r'Syncing:\s*(\d+)%')
 
-# --- 1. ТЕЛЕГРАМ ПОТОКИ ---
 def tg_sender_worker():
     msg_id = None
     last_pct = -1
@@ -40,13 +36,10 @@ def tg_sender_worker():
 
     while True:
         with state_lock:
-            st_stage = state["stage"]
-            st_pct = state["percent"]
-            st_status = state["status"]
-            st_err = state["error_msg"]
+            st_stage, st_pct, st_status, st_err = state["stage"], state["percent"], state["status"], state["error_msg"]
 
         if not msg_id:
-            res = req("sendMessage", chat_id=CHAT_ID, text=f"🚀 Запуск процесса...\n🌐 Web UI: http://{requests.get('https://ifconfig.me').text}:8080", parse_mode="HTML")
+            res = req("sendMessage", chat_id=CHAT_ID, text=f"🚀 Запуск процесса...\n🌐 Web UI: http://{requests.get('https://ifconfig.me', timeout=5).text}:8080", parse_mode="HTML")
             msg_id = res.get("result", {}).get("message_id")
             time.sleep(2)
             continue
@@ -61,7 +54,6 @@ def tg_sender_worker():
             req("editMessageText", chat_id=CHAT_ID, message_id=msg_id, text=f"✅ Процесс '{st_stage}' завершен со статусом: {st_status.upper()}", parse_mode="HTML")
             break
         
-        # Обновление прогрессбара раз в 15 секунд
         if (st_pct != last_pct or st_stage != last_stage) and st_status == "running":
             bar = "█" * int(st_pct/10) + "░" * (10 - int(st_pct/10))
             req("editMessageText", chat_id=CHAT_ID, message_id=msg_id, text=f"⚙️ <b>{st_stage}</b>\nПрогресс: {st_pct}%\n<code>[{bar}]</code>", parse_mode="HTML")
@@ -95,7 +87,6 @@ def tg_listener_worker():
             except: pass
         time.sleep(3)
 
-# --- 2. ВЕБ-СЕРВЕР ---
 HTML_PAGE = """
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ROM Builder Dashboard</title>
 <style>
@@ -162,7 +153,6 @@ class WebHandler(BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                 with state_lock: self.wfile.write(json.dumps({"stage": state["stage"], "percent": state["percent"], "status": state["status"], "logs": list(state["logs"])}).encode())
             elif self.path == '/api/wait_confirm':
-                # Вызывается из bash: зависает, пока пользователь не ответит
                 with state_lock: state["status"] = "waiting"
                 while True:
                     with state_lock: ans = state["confirmation"]
@@ -179,7 +169,6 @@ class WebHandler(BaseHTTPRequestHandler):
         try:
             content_len = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_len).decode('utf-8') if content_len else ""
-            
             self.send_response(200); self.end_headers()
             with state_lock:
                 if self.path == '/api/stage': state["stage"] = body
@@ -189,20 +178,18 @@ class WebHandler(BaseHTTPRequestHandler):
         except: pass
     def log_message(self, format, *args): pass
 
-# --- 3. ЧТЕНИЕ ЛОГОВ (TAIL WORKER) ---
 def tail_worker():
     log_path = os.path.expanduser('~/build_full.log')
-    open(log_path, 'a').close() # Убедимся, что файл существует
+    open(log_path, 'a').close() 
     
     with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
-        f.seek(0, 2) # Перемотка в конец файла
+        f.seek(0, 2)
         while True:
             line = f.readline()
             if not line:
                 time.sleep(0.1)
                 continue
             
-            # Обработка новой строки
             clean = line.strip()
             if not clean: continue
             
@@ -215,7 +202,6 @@ def tail_worker():
                 if match := re_build.search(line): state["percent"] = int(match.group(1))
                 elif match := re_sync.search(line): state["percent"] = int(match.group(1))
 
-# Запуск всех потоков (демоны закроются при остановке сервера)
 threading.Thread(target=tg_sender_worker, daemon=True).start()
 threading.Thread(target=tg_listener_worker, daemon=True).start()
 threading.Thread(target=tail_worker, daemon=True).start()
