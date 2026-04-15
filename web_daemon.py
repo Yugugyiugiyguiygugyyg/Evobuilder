@@ -2,19 +2,19 @@ import sys, re, time, os, threading, json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import deque
 
-# Глобальное состояние
 state_lock = threading.Lock()
 state = {
-    "stage": "Инициализация...",
+    "stage": "Запуск...",
     "percent": 0,
-    "status": "running", # running, waiting, success, error, cancelled
-    "logs": deque(maxlen=200),
+    "status": "running",
+    "logs": deque(maxlen=300), # Увеличил количество строк лога
     "confirmation": None,
     "error_msg": ""
 }
 
+# Регулярки для вытаскивания процентов из Android сборки
 re_build = re.compile(r'\[\s*(\d+)%\s+\d+/\d+\]')
-re_sync = re.compile(r'Syncing:\s*(\d+)%')
+re_sync = re.compile(r'(\d+)%')
 
 HTML_PAGE = """
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ROM Dashboard</title>
@@ -26,7 +26,7 @@ HTML_PAGE = """
     .bar-bg { background: #334155; height: 25px; border-radius: 8px; margin: 20px 0; overflow: hidden; position: relative; }
     .bar-fill { background: linear-gradient(90deg, #3b82f6, #06b6d4); height: 100%; width: 0%; transition: width 0.3s; }
     .bar-text { position: absolute; width: 100%; text-align: center; top: 3px; font-weight: bold; text-shadow: 1px 1px 2px #000; }
-    .logs { background: #020617; color: #10b981; font-family: monospace; font-size: 13px; height: 400px; overflow-y: auto; padding: 15px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
+    .logs { background: #020617; color: #10b981; font-family: monospace; font-size: 12px; height: 500px; overflow-y: auto; padding: 15px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
     .confirm-box { display: none; background: #334155; padding: 20px; border-radius: 8px; text-align: center; margin-bottom: 20px; border: 2px solid #fbbf24; }
     button { padding: 10px 25px; font-size: 16px; border: none; border-radius: 6px; cursor: pointer; margin: 0 10px; font-weight: bold; }
     .btn-yes { background: #10b981; color: white; } .btn-no { background: #ef4444; color: white; }
@@ -68,7 +68,6 @@ HTML_PAGE = """
             stEl.innerText = d.status.toUpperCase();
             
             if (d.status === 'error') { logsEl.innerText += '\\n\\n🚨 ОШИБКА: ' + d.error_msg; }
-
             document.getElementById('confirm-box').style.display = (d.status === 'waiting') ? 'block' : 'none';
         } catch(e) {}
     }
@@ -111,27 +110,31 @@ class WebHandler(BaseHTTPRequestHandler):
 
 def tail_worker():
     log_path = os.path.expanduser('~/build_full.log')
-    open(log_path, 'a').close() # Убедимся, что файл есть
+    open(log_path, 'a').close()
     
     with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
         f.seek(0, 2)
         while True:
-            line = f.readline()
-            if not line:
+            # Читаем посимвольно, чтобы не пропускать апдейты repo sync (\r)
+            chunk = f.read(1024)
+            if not chunk:
                 time.sleep(0.1)
                 continue
             
-            clean = line.strip()
-            if not clean: continue
-            
-            with state_lock:
-                state["logs"].append(clean)
-                if "FAILED:" in line or "ninja: build stopped" in line:
-                    state["status"] = "error"
-                    state["error_msg"] = clean
+            # Разбиваем и по \n, и по \r
+            lines = re.split(r'[\r\n]+', chunk)
+            for line in lines:
+                clean = line.strip()
+                if not clean: continue
                 
-                if match := re_build.search(line): state["percent"] = int(match.group(1))
-                elif match := re_sync.search(line): state["percent"] = int(match.group(1))
+                with state_lock:
+                    state["logs"].append(clean)
+                    if "FAILED:" in line or "ninja: build stopped" in line:
+                        state["status"] = "error"
+                        state["error_msg"] = clean
+                    
+                    if match := re_build.search(line): state["percent"] = int(match.group(1))
+                    elif match := re_sync.search(line): state["percent"] = int(match.group(1))
 
 threading.Thread(target=tail_worker, daemon=True).start()
 print("Web-сервер запущен на порту 8080...")
