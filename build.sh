@@ -3,7 +3,7 @@ STATE_FILE="$HOME/.rom_build_state"
 LOG_FILE="$HOME/build_full.log"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# МАГИЯ: Заворачиваем ВЕСЬ вывод скрипта (и успешный, и ошибки) в лог-файл
+# Заворачиваем ВЕСЬ вывод скрипта (и успешный, и ошибки) в лог-файл
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # Строгий режим отлова ошибок
@@ -13,11 +13,12 @@ set -eEu -o pipefail
 trap 'curl -s -X POST "http://localhost:8080/api/error" -d "Сбой скрипта на строке $LINENO" || true' ERR
 
 if [ ! -f "$STATE_FILE" ]; then
-    echo "=== ЭТАП 1: Установка зависимостей (Ubuntu 24.04) ==="
+    echo "=== ЭТАП 1: Установка зависимостей ==="
     export DEBIAN_FRONTEND=noninteractive
     
     sudo apt update
-    sudo apt install -y git git-lfs aria2 python3 tmux systemd-zram-generator curl cron
+    # Добавлен ccache!
+    sudo apt install -y git git-lfs aria2 python3 tmux systemd-zram-generator curl cron ccache
 
     echo -e "[zram0]\ncompression-algorithm = zstd\nzram-fraction = 1\nmax-zram-size = 16384" | sudo tee /etc/systemd/zram-generator.conf > /dev/null
     echo "ClientAliveInterval 60" | sudo tee -a /etc/ssh/sshd_config > /dev/null
@@ -32,7 +33,6 @@ if [ ! -f "$STATE_FILE" ]; then
     sudo reboot
 else
     echo "=== ЭТАП 2: Сборка ==="
-    # Больше не удаляем метку, чтобы избежать бесконечных ребутов
     touch "$LOG_FILE"
 
     # 1. ЗАПУСК ДЕМОНА WEB-UI
@@ -45,8 +45,8 @@ else
     mkdir -p ~/evox && cd ~/evox
     git config --global user.email "you@example.com" && git config --global user.name "A4" && git lfs install
     
-    # Отключаем цветной вывод repo, чтобы он не засорял сайт спецсимволами
-    yes "" | repo init -u https://github.com/Evolution-X/manifest -b bq2 --git-lfs --depth=1 --color=never || true
+    # Инициализация (без флага --color, чтобы не крашилось)
+    yes "" | repo init -u https://github.com/Evolution-X/manifest -b bq2 --git-lfs --depth=1 || true
     
     rm -rf .repo/local_manifests
     # ТУТ ДОЛЖНА БЫТЬ ТВОЯ НАСТОЯЩАЯ ССЫЛКА НА ЛОКАЛЬНЫЕ МАНИФЕСТЫ:
@@ -54,11 +54,14 @@ else
     
     # 3. СИНХРОНИЗАЦИЯ
     curl -s -X POST "http://localhost:8080/api/stage" -d "Синхронизация (Repo Sync)"
-    # Убрали -q (quiet), чтобы он выводил каждый шаг загрузки
     repo sync --force-sync --optimized-fetch --no-tags --no-clone-bundle --prune -j4
 
     # 4. НАСТРОЙКА КЭША И УСТРОЙСТВА
     curl -s -X POST "http://localhost:8080/api/stage" -d "Настройка окружения (ccache/breakfast)"
+    
+    # ОТКЛЮЧАЕМ строгий режим, чтобы кривые скрипты Google не ломали сборку
+    set +eEu; set +o pipefail
+    
     source build/envsetup.sh
     sudo mkdir -p /mnt/ccache && mkdir -p ~/.cache/ccache
     if ! mountpoint -q /mnt/ccache; then sudo mount --bind $HOME/.cache/ccache /mnt/ccache; fi
